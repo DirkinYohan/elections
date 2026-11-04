@@ -1,13 +1,14 @@
-package com.preconteo.elecciones;
+package com.elections;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
-class EleccionesApplicationTests {
+class ElectionsApplicationTests {
 
-	@Test
-	void contextLoads() {
-	}
+    @Test
+    void contextLoads() {
+    }
 
 }
+
