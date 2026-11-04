@@ -1,214 +1,181 @@
 package com.elections.interfaces.controller;
 
-import com.elections.modules.audit.AuditApi;
-import com.elections.modules.audit.internal.dto.AuditEventDto;
-import com.elections.modules.ballots.BallotsApi;
-import com.elections.modules.ballots.internal.dto.BallotTransmissionDto;
-import com.elections.modules.broadcast.BroadcastApi;
-import com.elections.modules.identity.IdentityApi;
-import com.elections.modules.identity.internal.dto.SessionDto;
-import com.elections.modules.presence.PresenceApi;
-import com.elections.modules.presence.internal.dto.HeartbeatDto;
-import com.elections.modules.recovery.RecoveryApi;
-import com.elections.modules.recovery.internal.dto.StateRecoveryDto;
-import com.elections.modules.results.ResultsApi;
-import com.elections.modules.results.internal.dto.AggregateDto;
-import com.elections.modules.security.SecurityApi;
-import com.elections.modules.security.internal.dto.RateValidationDto;
-import com.elections.modules.subscriptions.SubscriptionsApi;
-import com.elections.modules.verification.VerificationApi;
-import com.elections.modules.verification.internal.dto.CaseResolutionDto;
+import com.elections.infrastructure.InstanceInfo;
+import com.elections.infrastructure.chaos.ChaosService;
+import com.elections.infrastructure.database.PersistenceService;
+import com.elections.infrastructure.metrics.MetricsService;
+import com.elections.modules.ballots.BallotService;
+import com.elections.modules.broadcast.BroadcastService;
+import com.elections.modules.catalog.CatalogService;
+import com.elections.modules.identity.IdentityService;
+import com.elections.modules.presence.PresenceService;
+import com.elections.modules.results.ResultsService;
+import com.elections.modules.security.RateLimitService;
+import com.elections.modules.verification.VerificationService;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * APPLICATION ORCHESTRATOR CONTROLLER.
- * The ONLY controller in the application that exposes HTTP/REST endpoints to the Frontend.
- * Enforces separation of concerns, high cohesion, and low coupling by delegating
- * solely to the public APIs of the decoupled business modules.
- */
+/** Única puerta HTTP del backend. Delega en los módulos; el contrato está en CONTRACT.md del frontend. */
 @RestController
 @RequestMapping("/api/v1")
-@CrossOrigin(origins = "*")
 public class ElectionsOrchestratorController {
 
-    private final BallotsApi ballotsApi;
-    private final ResultsApi resultsApi;
-    private final VerificationApi verificationApi;
-    private final BroadcastApi broadcastApi;
-    private final SubscriptionsApi subscriptionsApi;
-    private final RecoveryApi recoveryApi;
-    private final PresenceApi presenceApi;
-    private final IdentityApi identityApi;
-    private final SecurityApi securityApi;
-    private final AuditApi auditApi;
+    private final IdentityService identity;
+    private final CatalogService catalog;
+    private final BallotService ballots;
+    private final RateLimitService rateLimit;
+    private final ResultsService results;
+    private final BroadcastService broadcast;
+    private final VerificationService verification;
+    private final PresenceService presence;
+    private final MetricsService metrics;
+    private final PersistenceService persistence;
+    private final ChaosService chaos;
+    private final InstanceInfo instance;
+    private final int rateLimitPerMinute;
 
-    public ElectionsOrchestratorController(BallotsApi ballotsApi,
-                                          ResultsApi resultsApi,
-                                          VerificationApi verificationApi,
-                                          BroadcastApi broadcastApi,
-                                          SubscriptionsApi subscriptionsApi,
-                                          RecoveryApi recoveryApi,
-                                          PresenceApi presenceApi,
-                                          IdentityApi identityApi,
-                                          SecurityApi securityApi,
-                                          AuditApi auditApi) {
-        this.ballotsApi = ballotsApi;
-        this.resultsApi = resultsApi;
-        this.verificationApi = verificationApi;
-        this.broadcastApi = broadcastApi;
-        this.subscriptionsApi = subscriptionsApi;
-        this.recoveryApi = recoveryApi;
-        this.presenceApi = presenceApi;
-        this.identityApi = identityApi;
-        this.securityApi = securityApi;
-        this.auditApi = auditApi;
+    public ElectionsOrchestratorController(IdentityService identity, CatalogService catalog, BallotService ballots,
+                                           RateLimitService rateLimit, ResultsService results, BroadcastService broadcast,
+                                           VerificationService verification, PresenceService presence, MetricsService metrics,
+                                           PersistenceService persistence, ChaosService chaos, InstanceInfo instance,
+                                           @Value("${app.ballots.rate-limit-per-minute:120}") int rateLimitPerMinute) {
+        this.identity = identity;
+        this.catalog = catalog;
+        this.ballots = ballots;
+        this.rateLimit = rateLimit;
+        this.results = results;
+        this.broadcast = broadcast;
+        this.verification = verification;
+        this.presence = presence;
+        this.metrics = metrics;
+        this.persistence = persistence;
+        this.chaos = chaos;
+        this.instance = instance;
+        this.rateLimitPerMinute = rateLimitPerMinute;
     }
 
-    // ==========================================
-    // 1. IDENTITY & ACCESS (AUTHENTICATION)
-    // ==========================================
+    @GetMapping("/health")
+    public Map<String, Object> health() {
+        Map<String, Object> h = new LinkedHashMap<>();
+        h.put("status", "UP");
+        h.put("instanceId", instance.id());
+        String redisStatus;
+        try {
+            results.ranking("department");
+            redisStatus = chaos.redisDown() ? "SIMULATED_DOWN" : "UP";
+        } catch (RuntimeException e) {
+            redisStatus = "DOWN";
+        }
+        h.put("redis", redisStatus);
+        h.put("postgres", persistence.ready() ? "UP" : "UNAVAILABLE");
+        return h;
+    }
+
     @PostMapping("/auth/login")
-    public ResponseEntity<?> login(@RequestBody Map<String, String> credentials) {
-        String username = credentials.get("username");
-        String password = credentials.get("password");
-        SessionDto session = identityApi.authenticate(username, password);
-        if (session == null) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(Map.of("error", "Invalid credentials"));
+    public ResponseEntity<?> login(@RequestBody Map<String, String> body) {
+        try {
+            return identity.authenticate(body.get("username"), body.get("password"))
+                    .<ResponseEntity<?>>map(ResponseEntity::ok)
+                    .orElseGet(() -> ResponseEntity.status(401).body(Map.of("error", "Invalid credentials")));
+        } catch (DataAccessException e) {
+            return ResponseEntity.status(503).body(Map.of("error", "Sistema degradado: Redis no responde"));
         }
-        return ResponseEntity.ok(session);
     }
 
-    // ==========================================
-    // 2. BALLOT TRANSMISSION (POLL WORKERS / JURIES)
-    // ==========================================
+    @GetMapping("/catalog")
+    public ResponseEntity<Map<String, Object>> catalog() {
+        return ResponseEntity.ok().cacheControl(CacheControl.maxAge(java.time.Duration.ofMinutes(10)).cachePublic()).body(catalog.catalog());
+    }
+
+    // ---- Jurados (RF-1, RF-2) -------------------------------------------------------------------
+
     @PostMapping("/ballots")
-    public ResponseEntity<?> receiveBallot(@RequestBody BallotTransmissionDto dto,
-                                           @RequestHeader(value = "X-Client-Id", defaultValue = "anonymous-jury") String clientId) {
-        // Rate limiting check (RF-10)
-        RateValidationDto rateLimit = securityApi.checkRateLimit(clientId, 120);
-        if (!rateLimit.isAllowed()) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .body(Map.of("error", "Rate limit exceeded"));
+    public ResponseEntity<?> submit(@RequestBody(required = false) Map<String, Object> sheet,
+                                    @RequestHeader(value = "X-Client-Id", defaultValue = "anonymous-jury") String clientId,
+                                    HttpServletResponse servlet) {
+        try {
+            long wait = rateLimit.check(clientId, rateLimitPerMinute);
+            if (wait > 0) {
+                return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", String.valueOf(wait))
+                        .body(Map.of("error", "Rate limit exceeded", "retryAfterSeconds", wait));
+            }
+        } catch (DataAccessException e) {
+            // sin Redis tampoco se puede registrar: lo responde el servicio con 503
         }
-
-        Map<String, Object> result = ballotsApi.processTransmission(dto);
-
-        // Immutable audit trail
-        auditApi.recordEvent(new AuditEventDto(
-                "BALLOT_RECEIVED",
-                dto.getBallotId(),
-                dto.getPollWorkerId(),
-                "Result status: " + result.get("status")
-        ));
-
-        // If accepted, enqueue into broadcast pipeline
-        if ("ACCEPTED".equals(result.get("status"))) {
-            broadcastApi.queueUpdate("dept:global", dto);
+        BallotService.Outcome out = ballots.submit(sheet);
+        if (out.httpStatus() < 300 && chaos.dropResponseRate() > 0 && Math.random() < chaos.dropResponseRate()) {
+            // Demostración RF-1: el acta YA quedó registrada, pero el "servidor muere" antes de confirmar.
+            // El cliente la mantiene en cola y la reenvía con el mismo idem: recibirá DUPLICATE con el mismo recibo.
+            servlet.setHeader("Connection", "close");
+            return ResponseEntity.status(502).body(Map.of("error", "Conexión perdida antes de confirmar"));
         }
-
-        return ResponseEntity.ok(result);
+        return ResponseEntity.status(out.httpStatus()).body(out.body());
     }
 
-    // ==========================================
-    // 3. ELECTORAL RESULTS (PUBLIC AUDIENCE)
-    // ==========================================
+    // ---- Público (RF-4, RF-5, RF-6) ------------------------------------------------------------
+
+    @GetMapping(value = "/stream", produces = "text/event-stream")
+    public ResponseEntity<?> stream(@RequestParam(defaultValue = "department") String topic,
+                                    @RequestParam(required = false) String lastEventId,
+                                    @RequestHeader(value = "Last-Event-ID", required = false) String lastEventIdHeader,
+                                    HttpServletResponse servlet) {
+        if (!catalog.isTopic(topic)) return ResponseEntity.badRequest().body(Map.of("error", "Tópico inválido"));
+        servlet.setHeader("Cache-Control", "no-cache, no-transform");
+        servlet.setHeader("X-Accel-Buffering", "no");
+        SseEmitter emitter = broadcast.open(topic, lastEventId != null ? lastEventId : lastEventIdHeader);
+        return ResponseEntity.ok(emitter);
+    }
+
     @GetMapping("/results/department")
-    public ResponseEntity<AggregateDto> getDepartmentResults() {
-        return ResponseEntity.ok(resultsApi.getDepartmentResults());
+    public Map<String, Object> department() {
+        return results.aggregate("DEPARTMENT", "GLOBAL", "department");
     }
 
     @GetMapping("/results/municipality/{id}")
-    public ResponseEntity<AggregateDto> getMunicipalityResults(@PathVariable Integer id) {
-        return ResponseEntity.ok(resultsApi.getMunicipalityResults(id));
+    public Map<String, Object> municipality(@PathVariable int id) {
+        return results.aggregate("MUNICIPALITY", String.valueOf(id), "municipality:" + id);
     }
 
     @GetMapping("/results/station/{id}")
-    public ResponseEntity<AggregateDto> getPollingStationResults(@PathVariable Integer id) {
-        return ResponseEntity.ok(resultsApi.getPollingStationResults(id));
+    public Map<String, Object> station(@PathVariable int id) {
+        return results.aggregate("POLLING_STATION", String.valueOf(id), "station:" + id);
     }
 
-    // ==========================================
-    // 4. CONTINUITY & RECOVERY (PUBLIC CLIENT RECONNECTION)
-    // ==========================================
-    @GetMapping("/results/recover")
-    public ResponseEntity<StateRecoveryDto> recoverState(
-            @RequestParam(defaultValue = "global") String topic,
-            @RequestParam(defaultValue = "0") long lastMonotonicId) {
-        return ResponseEntity.ok(recoveryApi.recoverFrom(topic, lastMonotonicId));
-    }
+    // ---- Verificación y operación (lectura REST) -------------------------------------------------
 
-    // ==========================================
-    // 5. VERIFICATION QUEUE (AUDITORS)
-    // ==========================================
     @GetMapping("/verification/queue")
-    public ResponseEntity<List<Map<String, Object>>> getVerificationQueue() {
-        return ResponseEntity.ok(verificationApi.listSuspiciousCasesQueue());
-    }
-
-    @PostMapping("/verification/lock")
-    public ResponseEntity<?> acquireCaseLock(@RequestParam String ballotId, @RequestParam String auditorId) {
-        boolean acquired = verificationApi.acquireCaseExclusiveLock(ballotId, auditorId);
-        if (!acquired) {
-            return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body(Map.of("error", "Case is already locked by another auditor or expired"));
-        }
-        auditApi.recordEvent(new AuditEventDto("CASE_LOCKED", ballotId, auditorId, "Case acquired for review"));
-        return ResponseEntity.ok(Map.of("message", "Case locked successfully"));
-    }
-
-    @PostMapping("/verification/release")
-    public ResponseEntity<?> releaseCaseLock(@RequestParam String ballotId, @RequestParam String auditorId) {
-        boolean released = verificationApi.releaseCaseLock(ballotId, auditorId);
-        if (!released) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body(Map.of("error", "Not the lock owner or lock already expired"));
-        }
-        auditApi.recordEvent(new AuditEventDto("CASE_RELEASED", ballotId, auditorId, "Case lock released"));
-        return ResponseEntity.ok(Map.of("message", "Case released successfully"));
-    }
-
-    @PostMapping("/verification/resolve")
-    public ResponseEntity<?> resolveCase(@RequestBody CaseResolutionDto resolution) {
-        boolean resolved = verificationApi.resolveCase(resolution);
-        if (!resolved) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(Map.of("error", "Unable to resolve case. Verify lock assignment"));
-        }
-        auditApi.recordEvent(new AuditEventDto(
-                "CASE_RESOLVED",
-                resolution.getBallotId(),
-                resolution.getAuditorId(),
-                "Decision: " + resolution.getDecision()
-        ));
-        return ResponseEntity.ok(Map.of("message", "Case resolved successfully"));
-    }
-
-    // ==========================================
-    // 6. PRESENCE (AUDITORS & COORDINATOR)
-    // ==========================================
-    @PostMapping("/verification/heartbeat")
-    public ResponseEntity<?> recordHeartbeat(@RequestBody HeartbeatDto heartbeat) {
-        presenceApi.registerHeartbeat(heartbeat);
-        return ResponseEntity.ok().build();
+    public Object queue() {
+        return verification.queue();
     }
 
     @GetMapping("/verification/auditors")
-    public ResponseEntity<List<Map<String, Object>>> getActiveAuditors() {
-        return ResponseEntity.ok(presenceApi.listActiveAuditors());
+    public ResponseEntity<?> auditors(@RequestHeader(value = "Authorization", required = false) String auth) {
+        var s = IdentityService.bearer(auth).flatMap(identity::session);
+        if (s.isEmpty() || s.get().role() == IdentityService.Role.JURY) return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
+        return ResponseEntity.ok(presence.list());
     }
 
-    // ==========================================
-    // 7. AUDIT & TRACEABILITY
-    // ==========================================
+    @GetMapping("/metrics")
+    public Map<String, Object> metrics() {
+        return metrics.globalView();
+    }
+
     @GetMapping("/audit/{ballotId}")
-    public ResponseEntity<List<AuditEventDto>> getBallotAuditTrail(@PathVariable String ballotId) {
-        return ResponseEntity.ok(auditApi.getBallotTraceability(ballotId));
+    public Object audit(@PathVariable String ballotId) {
+        return persistence.auditTrail(ballotId);
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    public ResponseEntity<Map<String, Object>> degraded(DataAccessException e) {
+        return ResponseEntity.status(503).body(Map.of("status", "UNAVAILABLE", "error", "Sistema degradado: Redis no responde"));
     }
 }
-

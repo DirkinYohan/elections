@@ -1,0 +1,65 @@
+# Ocho instancias + Redis + balanceador sin afinidad (RT-1, RT-2, RT-3), en una sola máquina.
+#   docker compose up --build      → http://localhost:8080 (el balanceador)
+# Lee las credenciales de Supabase del archivo .env.
+x-env: &env
+  REDIS_URL: redis://redis:6379
+  SUPABASE_DB_HOST: ${SUPABASE_DB_HOST:-}
+  SUPABASE_DB_PORT: ${SUPABASE_DB_PORT:-6543}
+  SUPABASE_DB_USER: ${SUPABASE_DB_USER:-}
+  SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD:-}
+  DB_ENABLED: ${DB_ENABLED:-true}
+  JAVA_OPTS: -Xmx384m -Xss512k
+x-api: &api
+  build: .
+  depends_on: [redis]
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+  api1:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api1
+  api2:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api2
+  api3:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api3
+  api4:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api4
+  api5:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api5
+  api6:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api6
+  api7:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api7
+  api8:
+    <<: *api
+    environment:
+      <<: *env
+      INSTANCE_ID: api8
+  lb:
+    image: nginx:1.27-alpine
+    volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["${LB_PORT:-8080}:8080"]
+    depends_on: [api1, api2, api3, api4, api5, api6, api7, api8]

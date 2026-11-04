@@ -1,35 +1,74 @@
 server:
-  port: 8080
+  port: ${PORT:8080}
+  shutdown: graceful
+  tomcat:
+    # Cada cliente SSE es una conexión abierta: el límite por defecto (8.192) no alcanza para 50.000 por instancia.
+    max-connections: ${TOMCAT_MAX_CONNECTIONS:60000}
+    accept-count: 2000
+    connection-timeout: 20s
 
 spring:
   application:
     name: elections
   config:
     import: optional:file:.env[.properties]
-  datasource:
-    # Supabase pooler en modo transacción (6543): prepareThreshold=0 evita errores de prepared statements
-    url: jdbc:postgresql://${SUPABASE_DB_HOST}:${SUPABASE_DB_PORT:6543}/${SUPABASE_DB_NAME:postgres}?sslmode=require&prepareThreshold=0
-    username: ${SUPABASE_DB_USER}
-    password: ${SUPABASE_DB_PASSWORD}
-    driver-class-name: org.postgresql.Driver
-    hikari:
-      maximum-pool-size: 10
-      minimum-idle: 2
-      connection-timeout: 10000
+  threads:
+    virtual:
+      enabled: true
+  mvc:
+    async:
+      request-timeout: -1
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      url: ${REDIS_URL:redis://localhost:6379}
       timeout: 2000ms
       lettuce:
         pool:
+          enabled: true
           max-active: 64
           max-idle: 16
-          min-idle: 4
+          min-idle: 2
           max-wait: 1000ms
+  datasource:
+    # Supabase pooler en modo transacción (6543): prepareThreshold=0 evita errores de prepared statements
+    url: jdbc:postgresql://${SUPABASE_DB_HOST:localhost}:${SUPABASE_DB_PORT:6543}/${SUPABASE_DB_NAME:postgres}?sslmode=${SUPABASE_DB_SSLMODE:require}&prepareThreshold=0
+    username: ${SUPABASE_DB_USER:postgres}
+    password: ${SUPABASE_DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:5}
+      minimum-idle: 0
+      connection-timeout: 10000
+      initialization-fail-timeout: -1
+
+app:
+  # Identificador de instancia (RT-1): Render lo define en RENDER_INSTANCE_ID; en Docker es el hostname.
+  instance-id: ${INSTANCE_ID:${RENDER_INSTANCE_ID:${HOSTNAME:}}}
+  # Orígenes permitidos (frontend en Vercel). Separados por coma; admite comodines: https://*.vercel.app
+  cors-origins: ${CORS_ORIGINS:*}
+  db:
+    enabled: ${DB_ENABLED:true}
+  demo:
+    # Controles de demostración (/api/v1/mock/*): caída simulada de Redis, simulador de jurados, matar conexiones.
+    controls-enabled: ${DEMO_CONTROLS_ENABLED:true}
+    password: ${DEMO_PASSWORD:pass123}
+    simulator-autostart: ${SIM_AUTOSTART:true}
+    simulator-interval-ms: ${SIM_INTERVAL_MS:400}
+  broadcast:
+    window-ms: ${WINDOW_MS:2000}
+    fanout-batch: ${FANOUT_BATCH:500}
+    slow-client-bytes: ${SLOW_CLIENT_BYTES:262144}
+    topic-retention: ${TOPIC_RETENTION:300}
+    feed-retention: ${FEED_RETENTION:20000}
+  verification:
+    lock-ttl-ms: ${LOCK_TTL_MS:30000}
+    heartbeat-ms: 10000
+    presence-ttl-ms: 25000
+  ballots:
+    rate-limit-per-minute: ${RATE_LIMIT_PER_MINUTE:120}
+    idem-ttl-seconds: ${IDEM_TTL_SECONDS:86400}
 
 logging:
   level:
-    com.elections: DEBUG
+    com.elections: INFO
     org.springframework.web: INFO
-    org.springframework.data.redis: INFO

@@ -1,0 +1,43 @@
+# Blueprint de Render: en el panel, New → Blueprint → elige este repositorio. Crea el backend y su Redis.
+# Solo tendrás que escribir los secretos marcados con sync: false (Supabase y el dominio de Vercel).
+services:
+  - type: keyvalue            # Redis administrado (Render Key Value): backplane, acumulados, bloqueos, presencia
+    name: elections-redis
+    plan: free
+    maxmemoryPolicy: noeviction   # nunca descartar acumulados ni bloqueos por falta de memoria
+    ipAllowList: []               # solo accesible desde servicios de Render
+
+  - type: web
+    name: elections-api
+    runtime: docker
+    plan: free
+    # RT-1 pide 8 instancias. En el plan free Render solo permite 1; con un plan pago (starter o superior)
+    # cambia la línea de abajo a numInstances: 8. El código no cambia: no hay sesiones pegajosas (RT-2).
+    numInstances: 1
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: elections-redis
+          property: connectionString
+      - key: SUPABASE_DB_HOST
+        sync: false
+      - key: SUPABASE_DB_PORT
+        value: "6543"
+      - key: SUPABASE_DB_NAME
+        value: postgres
+      - key: SUPABASE_DB_USER
+        sync: false
+      - key: SUPABASE_DB_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false             # p. ej. https://tu-app.vercel.app,https://*.vercel.app
+      - key: DEMO_PASSWORD
+        value: pass123
+      - key: DEMO_CONTROLS_ENABLED
+        value: "true"
+      - key: SIM_AUTOSTART
+        value: "true"
+      - key: JAVA_OPTS
+        value: "-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Xss512k"
