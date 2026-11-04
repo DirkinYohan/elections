@@ -4,6 +4,18 @@ server:
 spring:
   application:
     name: elections
+  config:
+    import: optional:file:.env[.properties]
+  datasource:
+    # Supabase pooler en modo transacción (6543): prepareThreshold=0 evita errores de prepared statements
+    url: jdbc:postgresql://${SUPABASE_DB_HOST}:${SUPABASE_DB_PORT:6543}/${SUPABASE_DB_NAME:postgres}?sslmode=require&prepareThreshold=0
+    username: ${SUPABASE_DB_USER}
+    password: ${SUPABASE_DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
   data:
     redis:
       host: ${REDIS_HOST:localhost}
